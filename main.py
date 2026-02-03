@@ -31,6 +31,55 @@ if not logger.handlers:
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
+import os
+import subprocess
+
+def download_kaggle_data(competition: str = "house-prices-advanced-regression-techniques") -> None:
+    """
+    Downloads Kaggle competition data if train.csv is missing.
+    Requires kaggle.json configured in ~/.kaggle/kaggle.json
+    """
+    if os.path.exists("train.csv") and os.path.exists("test.csv"):
+        logger.info("Kaggle data already present (train.csv/test.csv). Skipping download.")
+        return
+
+    # Check credentials exist
+    kaggle_json = os.path.expanduser("~/.kaggle/kaggle.json")
+    if not os.path.exists(kaggle_json):
+        raise FileNotFoundError(
+            "Missing Kaggle credentials. Please upload kaggle.json and place it at ~/.kaggle/kaggle.json\n"
+            "Colab example:\n"
+            "  from google.colab import files\n"
+            "  files.upload()  # upload kaggle.json\n"
+            "  !mkdir -p ~/.kaggle\n"
+            "  !mv kaggle.json ~/.kaggle/\n"
+            "  !chmod 600 ~/.kaggle/kaggle.json\n"
+        )
+
+    zip_name = f"{competition}.zip"
+
+    logger.info("Downloading Kaggle competition data: %s", competition)
+    subprocess.run(
+        ["kaggle", "competitions", "download", "-c", competition],
+        check=True
+    )
+
+    if not os.path.exists(zip_name):
+        # Kaggle sometimes downloads with the same expected name, but guard anyway
+        zips = [f for f in os.listdir(".") if f.endswith(".zip")]
+        if len(zips) == 1:
+            zip_name = zips[0]
+        else:
+            raise FileNotFoundError(f"Expected {zip_name} but found: {zips}")
+
+    logger.info("Unzipping: %s", zip_name)
+    subprocess.run(["unzip", "-o", zip_name], check=True)
+
+    logger.info("Kaggle data ready: train.csv/test.csv found=%s/%s",
+                os.path.exists("train.csv"), os.path.exists("test.csv"))
+
+
+
 
 @dataclass
 class DatasetPack:
@@ -191,6 +240,7 @@ def train_full_and_submit(
 
 
 def main():
+    download_kaggle_data()
     data = load_data("train.csv", "test.csv")
 
     # Base params (GPU + sane defaults)
