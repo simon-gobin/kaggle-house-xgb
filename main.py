@@ -2,7 +2,7 @@ import logging
 import os
 import subprocess
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict
 
 import numpy as np
 import pandas as pd
@@ -10,8 +10,8 @@ import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.feature_selection import VarianceThreshold
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import mean_squared_error
-from sklearn.model_selection import KFold, ParameterGrid
+from sklearn.metrics import make_scorer, mean_squared_error
+from sklearn.model_selection import GridSearchCV, KFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OrdinalEncoder
 
@@ -105,34 +105,41 @@ def kaggle_submit(competition: str, file_path: str, message: str) -> None:
 
 
 # ---------------------------
-# Data pack
+# Data pack (kept for final train/predict convenience)
 # ---------------------------
 @dataclass
 class DatasetPack:
-    X_train_v: np.ndarray
-    X_test_v: np.ndarray
+    X_train_df: pd.DataFrame
+    X_test_df: pd.DataFrame
     y: np.ndarray
     test_ids: np.ndarray
 
 
-def load_data(train_path: str = "train.csv", test_path: str = "test.csv") -> DatasetPack:
+def load_dataframes(train_path: str = "train.csv", test_path: str = "test.csv") -> DatasetPack:
     logger.info("Loading data: train=%s test=%s", train_path, test_path)
 
     train = pd.read_csv(train_path)
     test = pd.read_csv(test_path)
 
     y = np.log1p(train["SalePrice"].values.astype(np.float32))
-    train = train.drop(columns=["SalePrice"])
+    X_train_df = train.drop(columns=["SalePrice"])
 
     test_ids = test["Id"].values
+    X_test_df = test.copy()
 
-    all_data = pd.concat([train, test], axis=0, ignore_index=True)
+    logger.info("Train/Test shapes: %s / %s", X_train_df.shape, X_test_df.shape)
 
-    num_cols = all_data.select_dtypes(include=["int64", "float64"]).columns
-    # pandas>=2.2 string dtype warning: include both object and string
-    cat_cols = all_data.select_dtypes(include=["object", "string"]).columns
+    return DatasetPack(X_train_df=X_train_df, X_test_df=X_test_df, y=y, test_ids=test_ids)
 
-    logger.info("Columns: numeric=%d categorical=%d total=%d", len(num_cols), len(cat_cols), all_data.shape[1])
+
+# ---------------------------
+# Build sklearn Pipeline (preprocess + VT + XGBRegressor)
+# ---------------------------
+def build_pipeline(X_train_df: pd.DataFrame, use_gpu: bool = False) -> Pipeline:
+    num_cols = X_train_df.select_dtypes(include=["int64", "float64"]).columns
+    cat_cols = X_train_df.select_dtypes(include=["object", "string"]).columns
+
+    logger.info("Columns: numeric=%d categorical=%d total=%d", len(num_cols), len(cat_cols), X_train_df.shape[1])
 
     numeric_pipe = Pipeline([("imputer", SimpleImputer(strategy="median"))])
 
@@ -151,178 +158,44 @@ def load_data(train_path: str = "train.csv", test_path: str = "test.csv") -> Dat
         remainder="drop",
     )
 
-    X_all = preprocess.fit_transform(all_data).astype(np.float32)
-
-    X_train = X_all[: len(y)]
-    X_test = X_all[len(y) :]
-
-    logger.info("Matrix shapes: X_train=%s X_test=%s", X_train.shape, X_test.shape)
-
-    vt = VarianceThreshold(threshold=1e-5)
-    X_train_v = vt.fit_transform(X_train)
-    X_test_v = vt.transform(X_test)
-
-    logger.info("After VarianceThreshold: X_train_v=%s X_test_v=%s", X_train_v.shape, X_test_v.shape)
-
-    return DatasetPack(X_train_v=X_train_v, X_test_v=X_test_v, y=y, test_ids=test_ids)
-
-
-# ---------------------------
-# CV + Grid search using xgb.train (DMatrix)
-# ---------------------------
-def cv_rmse_xgb_dmatrix(
-    X: np.ndarray,
-    y: np.ndarray,
-    params: Dict[str, Any],
-    n_splits: int = 5,
-    seed: int = 42,
-    early_stopping_rounds: int = 200,
-    num_boost_round: int = 20000,
-) -> Tuple[float, float, int]:
-    """
-    Returns: mean_rmse, std_rmse, mean_best_iteration
-    """
-    kf = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
-    rmses: List[float] = []
-    best_iters: List[int] = []
-
-    train_params = dict(params)
-    train_params.setdefault("objective", "reg:squarederror")
-    train_params.setdefault("eval_metric", "rmse")
-
-    for fold, (tr_idx, va_idx) in enumerate(kf.split(X), 1):
-        X_tr, X_va = X[tr_idx], X[va_idx]
-        y_tr, y_va = y[tr_idx], y[va_idx]
-
-        dtrain = xgb.DMatrix(X_tr, label=y_tr)
-        dvalid = xgb.DMatrix(X_va, label=y_va)
-
-        early_stop = xgb.callback.EarlyStopping(
-            rounds=early_stopping_rounds,
-            metric_name="rmse",
-            data_name="Valid",
-            save_best=True,
-        )
-
-        booster = xgb.train(
-            params=train_params,
-            dtrain=dtrain,
-            num_boost_round=num_boost_round,
-            evals=[(dtrain, "Train"), (dvalid, "Valid")],
-            callbacks=[early_stop],
-            verbose_eval=False,
-        )
-
-        pred = booster.predict(dvalid)
-        rmse = mean_squared_error(y_va, pred)
-        rmses.append(rmse)
-
-        bi = getattr(booster, "best_iteration", None)
-        best_iters.append(int(bi) if bi is not None else num_boost_round)
-
-        logger.info("Fold %d RMSE=%.5f best_iter=%s", fold, rmse, bi)
-
-    mean_rmse = float(np.mean(rmses))
-    std_rmse = float(np.std(rmses))
-    mean_best_iter = int(round(float(np.mean(best_iters))))
-
-    return mean_rmse, std_rmse, mean_best_iter
-
-
-def grid_search_xgb(
-    data: DatasetPack,
-    grid: Dict[str, List[Any]],
-    base_params: Dict[str, Any],
-    top_n: int = 5,
-    early_stopping_rounds: int = 200,
-    num_boost_round: int = 20000,
-) -> List[Dict[str, Any]]:
-    results: List[Dict[str, Any]] = []
-    combos = list(ParameterGrid(grid))
-
-    logger.info("Starting grid search: %d combinations", len(combos))
-
-    for i, gparams in enumerate(combos, 1):
-        params = {**base_params, **gparams}
-
-        mean_rmse, std_rmse, mean_best_iter = cv_rmse_xgb_dmatrix(
-            X=data.X_train_v,
-            y=data.y,
-            params=params,
-            n_splits=5,
-            seed=42,
-            early_stopping_rounds=early_stopping_rounds,
-            num_boost_round=num_boost_round,
-        )
-
-        row = {
-            "mean_rmse": mean_rmse,
-            "std_rmse": std_rmse,
-            "mean_best_iter": mean_best_iter,
-            "params": gparams,
-        }
-        results.append(row)
-
-        logger.info(
-            "[%d/%d] RMSE=%.5f ± %.5f | best_iter~%d | %s",
-            i,
-            len(combos),
-            mean_rmse,
-            std_rmse,
-            mean_best_iter,
-            gparams,
-        )
-
-    # Save full results (nice artifact for your repo)
-    df = pd.DataFrame(
-        [
-            {"mean_rmse": r["mean_rmse"], "std_rmse": r["std_rmse"], "mean_best_iter": r["mean_best_iter"], **r["params"]}
-            for r in results
-        ]
-    ).sort_values("mean_rmse")
-    df.to_csv("grid_results.csv", index=False)
-    logger.info("Saved grid results to grid_results.csv")
-
-    results_sorted = sorted(results, key=lambda r: r["mean_rmse"])[:top_n]
-
-    logger.info("Top %d configs:", top_n)
-    for rank, r in enumerate(results_sorted, 1):
-        logger.info(
-            "#%d RMSE=%.5f ± %.5f | best_iter~%d | %s",
-            rank,
-            r["mean_rmse"],
-            r["std_rmse"],
-            r["mean_best_iter"],
-            r["params"],
-        )
-
-    return results_sorted
-
-
-def train_full_and_submit_dmatrix(
-    data: DatasetPack,
-    best_params: Dict[str, Any],
-    best_num_boost_round: int,
-    submission_path: str = "submission.csv",
-) -> None:
-    logger.info("Training final model (xgb.train) with params: %s", best_params)
-    logger.info("Using num_boost_round=%d", best_num_boost_round)
-
-    dtrain = xgb.DMatrix(data.X_train_v, label=data.y)
-    booster = xgb.train(
-        params=best_params,
-        dtrain=dtrain,
-        num_boost_round=best_num_boost_round,
-        verbose_eval=False,
+    # IMPORTANT for CPU parallel grid search:
+    # - set model n_jobs=1 so each fit uses 1 CPU core
+    # - let GridSearchCV(n_jobs=-1) parallelize across configs/folds
+    model_params: Dict[str, Any] = dict(
+        objective="reg:squarederror",
+        eval_metric="rmse",
+        tree_method="hist",
+        n_estimators=4000,     # no early stopping here; keep reasonable
+        random_state=42,
+        n_jobs=-1,
     )
 
-    dtest = xgb.DMatrix(data.X_test_v)
-    test_pred = booster.predict(dtest)
-    test_pred = np.expm1(test_pred)
+    if use_gpu:
+        # WARNING: parallel GridSearchCV on a single GPU is usually slower/unstable.
+        model_params.update({"device": "cuda"})
 
-    submission = pd.DataFrame({"Id": data.test_ids, "SalePrice": test_pred})
-    submission.to_csv(submission_path, index=False)
-    logger.info("Saved submission to: %s", submission_path)
+    model = xgb.XGBRegressor(**model_params)
+
+    pipe = Pipeline(
+        [
+            ("prep", preprocess),
+            ("vt", VarianceThreshold(threshold=1e-5)),
+            ("xgb", model),
+        ]
+    )
+
+    return pipe
+
+
+# ---------------------------
+# Scoring: RMSE (log target)
+# GridSearchCV maximizes => use negative RMSE
+# ---------------------------
+def _rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    return mean_squared_error(y_true, y_pred)
+
+
+rmse_scorer = make_scorer(_rmse, greater_is_better=False)
 
 
 # ---------------------------
@@ -332,59 +205,64 @@ def main():
     competition = "house-prices-advanced-regression-techniques"
 
     download_kaggle_data(competition=competition)
-    data = load_data("train.csv", "test.csv")
+    data = load_dataframes("train.csv", "test.csv")
 
-    # Base params for xgb.train (booster params)
-    base_params = dict(
-        objective="reg:squarederror",
-        eval_metric="rmse",
-        tree_method="hist",
-        device="cuda",  # GPU on Colab; on Mac CPU it will just ignore/behave accordingly
-        max_depth=6,
-        eta=0.05,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        reg_lambda=1.0,
-        reg_alpha=0.0,
-        min_child_weight=1,
-        seed=42,
-    )
+    # Build pipeline (CPU parallel grid search)
+    pipe = build_pipeline(data.X_train_df, use_gpu=False)
 
-    # NOTE: 972 combos can take a long time. Start smaller for sanity if needed.
-    grid = {
-        "max_depth": [4, 6, 8],
-        "eta": [0.03, 0.05, 0.08],
-        "subsample": [0.7, 0.85, 1.0],
-        "colsample_bytree": [0.7, 0.85, 1.0],
-        "reg_lambda": [0.5, 1.0, 2.0],
-        "reg_alpha": [0.0, 0.1],
-        "min_child_weight": [1, 5],
+    # Param grid: note the "xgb__" prefix (pipeline step name)
+    param_grid = {
+        "xgb__max_depth": [4, 6, 8],
+        "xgb__learning_rate": [0.03, 0.05, 0.08],
+        "xgb__subsample": [0.7, 0.85, 1.0],
+        "xgb__colsample_bytree": [0.7, 0.85, 1.0],
+        "xgb__reg_lambda": [0.5, 1.0, 2.0],
+        "xgb__reg_alpha": [0.0, 0.1],
+        "xgb__min_child_weight": [1, 5],
     }
 
-    top_results = grid_search_xgb(
-        data=data,
-        grid=grid,
-        base_params=base_params,
-        top_n=5,
-        early_stopping_rounds=200,
-        num_boost_round=20000,
+    # CV
+    cv = KFold(n_splits=5, shuffle=True, random_state=42)
+
+    logger.info("Starting GridSearchCV (CPU parallel). Param combos=%d", len(list(GridSearchCV(pipe, param_grid).param_grid)))
+
+    gs = GridSearchCV(
+        estimator=pipe,
+        param_grid=param_grid,
+        scoring=rmse_scorer,   # negative RMSE
+        cv=cv,
+        n_jobs=-1,             # CPU parallelization
+        verbose=2,
+        return_train_score=False,
     )
 
-    best = top_results[0]
-    best_params = {**base_params, **best["params"]}
-    best_num_boost_round = int(best["mean_best_iter"])
+    logger.info("Fitting GridSearchCV...")
+    gs.fit(data.X_train_df, data.y)
 
-    train_full_and_submit_dmatrix(
-        data=data,
-        best_params=best_params,
-        best_num_boost_round=best_num_boost_round,
-        submission_path="submission.csv",
-    )
+    best_score = float(gs.best_score_)  # negative RMSE
+    best_params = gs.best_params_
+    logger.info("Best (negative RMSE): %.6f | RMSE: %.6f", best_score, -best_score)
+    logger.info("Best params: %s", best_params)
 
+    # Save all results
+    results_df = pd.DataFrame(gs.cv_results_).sort_values("rank_test_score")
+    results_df.to_csv("grid_results.csv", index=False)
+    logger.info("Saved grid results to grid_results.csv")
+
+    # Train best estimator on full train and predict test
+    best_model: Pipeline = gs.best_estimator_
+    test_pred_log = best_model.predict(data.X_test_df)
+    test_pred = np.expm1(test_pred_log)
+
+    submission = pd.DataFrame({"Id": data.test_ids, "SalePrice": test_pred})
+    submission.to_csv("submission.csv", index=False)
+    logger.info("Saved submission.csv")
+
+    # Submit to Kaggle
     kaggle_submit(
         competition=competition,
         file_path="submission.csv",
-        message=f"XGBoost GPU grid search (best params, rounds={best_num_boost_round})",
+        message=f"GridSearchCV CPU | RMSE(log)={-best_score:.5f}",
     )
 
 
