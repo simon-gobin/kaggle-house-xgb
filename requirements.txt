@@ -2,3 +2,6 @@ numpy
 pandas
 scikit-learn
 xgboost
+kaggle
+tqdm
+matplotlib
