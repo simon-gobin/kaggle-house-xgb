@@ -5,3 +5,5 @@ xgboost
 kaggle
 tqdm
 matplotlib
+lightgbm
+optuna
