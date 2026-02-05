@@ -8,6 +8,7 @@ Config:
 """
 
 import logging
+import os
 import numpy as np
 import pandas as pd
 
@@ -33,6 +34,15 @@ logger = logging.getLogger("STACK_HEAVY")
 
 N_FOLDS = 5
 N_TRIALS = 15
+
+
+def gpu_available():
+    if os.environ.get("USE_GPU") == "1":
+        return True
+    cuda_env = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cuda_env and cuda_env not in ("", "-1", "none", "None"):
+        return True
+    return False
 
 
 def load_data():
@@ -116,6 +126,7 @@ def rmse(y_true, y_pred):
 def optuna_catboost(X, y, cat_cols):
     cat_idx = [X.columns.get_loc(c) for c in cat_cols]
     cv = KFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
+    use_gpu = gpu_available()
 
     def objective(trial):
         params = {
@@ -136,6 +147,9 @@ def optuna_catboost(X, y, cat_cols):
             "leaf_estimation_iterations": trial.suggest_int("leaf_estimation_iterations", 1, 10),
             "verbose": False,
         }
+        if use_gpu:
+            params["task_type"] = "GPU"
+            params["devices"] = "0"
 
         scores = []
         for tr, va in cv.split(X):
@@ -156,6 +170,7 @@ def optuna_catboost(X, y, cat_cols):
 
 def optuna_xgboost(X, y):
     cv = KFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
+    use_gpu = gpu_available()
 
     def objective(trial):
         params = {
@@ -167,10 +182,12 @@ def optuna_xgboost(X, y):
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
             "reg_alpha": trial.suggest_float("reg_alpha", 0.0, 1.0),
             "reg_lambda": trial.suggest_float("reg_lambda", 0.5, 2.0),
-            "tree_method": "hist",
+            "tree_method": "gpu_hist" if use_gpu else "hist",
             "n_jobs": 1,
             "random_state": 42,
         }
+        if use_gpu:
+            params["predictor"] = "gpu_predictor"
 
         scores = []
         for tr, va in cv.split(X):
@@ -195,6 +212,7 @@ def optuna_xgboost(X, y):
 
 def optuna_lightgbm(X, y):
     cv = KFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
+    use_gpu = gpu_available()
 
     def objective(trial):
         params = {
@@ -210,6 +228,8 @@ def optuna_lightgbm(X, y):
             "random_state": 42,
             "n_jobs": 1,
         }
+        if use_gpu:
+            params["device"] = "gpu"
 
         scores = []
         for tr, va in cv.split(X):
@@ -249,6 +269,7 @@ def oof_sklearn(model, X, y, test):
 def oof_predictions_catboost(X, y, test, cat_cols, params):
     cat_idx = [X.columns.get_loc(c) for c in cat_cols]
     cv = KFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
+    use_gpu = gpu_available()
     oof = np.zeros(len(X), dtype=np.float32)
     test_preds = []
 
@@ -259,7 +280,11 @@ def oof_predictions_catboost(X, y, test, cat_cols, params):
         valid_pool = Pool(Xva, yva, cat_features=cat_idx)
         test_pool = Pool(test, cat_features=cat_idx)
 
-        model = CatBoostRegressor(**params, verbose=False)
+        cb_params = dict(params)
+        if use_gpu:
+            cb_params["task_type"] = "GPU"
+            cb_params["devices"] = "0"
+        model = CatBoostRegressor(**cb_params, verbose=False)
         model.fit(train_pool, eval_set=valid_pool, use_best_model=True)
         oof[va] = model.predict(valid_pool)
         test_preds.append(model.predict(test_pool))
@@ -269,13 +294,17 @@ def oof_predictions_catboost(X, y, test, cat_cols, params):
 
 def oof_predictions_xgb(X, y, test, params):
     cv = KFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
+    use_gpu = gpu_available()
     oof = np.zeros(len(X), dtype=np.float32)
     test_preds = []
 
     for tr, va in cv.split(X):
         Xtr, Xva = X[tr], X[va]
         ytr, yva = y[tr], y[va]
-        model = xgb.XGBRegressor(**params, tree_method="hist", n_jobs=1, random_state=42)
+        tree_method = "gpu_hist" if use_gpu else "hist"
+        model = xgb.XGBRegressor(**params, tree_method=tree_method, n_jobs=1, random_state=42)
+        if use_gpu:
+            model.set_params(predictor="gpu_predictor")
         model.fit(Xtr, ytr, eval_set=[(Xva, yva)], verbose=False, early_stopping_rounds=200)
         oof[va] = model.predict(Xva)
         test_preds.append(model.predict(test))
@@ -285,6 +314,7 @@ def oof_predictions_xgb(X, y, test, params):
 
 def oof_predictions_lgb(X, y, test, params):
     cv = KFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
+    use_gpu = gpu_available()
     oof = np.zeros(len(X), dtype=np.float32)
     test_preds = []
 
@@ -292,6 +322,8 @@ def oof_predictions_lgb(X, y, test, params):
         Xtr, Xva = X[tr], X[va]
         ytr, yva = y[tr], y[va]
         model = lgb.LGBMRegressor(**params, random_state=42, n_jobs=1)
+        if use_gpu:
+            model.set_params(device="gpu")
         model.fit(
             Xtr,
             ytr,
