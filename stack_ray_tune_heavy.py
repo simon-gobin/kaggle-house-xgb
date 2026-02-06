@@ -18,6 +18,7 @@ from sklearn.metrics import mean_squared_error
 from sklearn.preprocessing import OrdinalEncoder, StandardScaler
 from sklearn.linear_model import RidgeCV, BayesianRidge, ElasticNet
 from sklearn.neighbors import KNeighborsRegressor
+from sklearn.neural_network import MLPRegressor
 from sklearn.svm import SVR
 from sklearn.base import clone
 
@@ -30,6 +31,7 @@ import lightgbm as lgb
 import ray
 from ray import tune
 from ray.tune.search.optuna import OptunaSearch
+from pytorch_tabnet.tab_model import TabNetRegressor
 
 
 logging.basicConfig(
@@ -38,10 +40,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("STACK_RAY")
 
-N_FOLDS = 3
+N_FOLDS = 10
 N_SAMPLES = 15
 RESOURCES = {"cpu": 10, "gpu": 0}
 CATBOOST_USE_GPU = False   # force CatBoost to CPU to avoid GPU VRAM pressure
+USE_TABNET = True
 
 
 
@@ -136,6 +139,10 @@ def preprocess_tree(X: pd.DataFrame, test: pd.DataFrame):
         X[cat_cols] = enc.transform(X[cat_cols])
         test[cat_cols] = enc.transform(test[cat_cols])
 
+    # Final safety: ensure no NaNs remain (required for sklearn RF/ET)
+    X = X.fillna(0)
+    test = test.fillna(0)
+
     return X.astype(np.float32), test.astype(np.float32)
 
 
@@ -173,8 +180,14 @@ def cv_xgb(params, X, y):
         Xtr, Xva = X[tr], X[va]
         ytr, yva = y[tr], y[va]
         model = xgb.XGBRegressor(**params)
-        es = xgb.callback.EarlyStopping(rounds=200, save_best=True, maximize=False)
-        model.fit(Xtr, ytr, eval_set=[(Xva, yva)], verbose=False, callbacks=[es])
+        try:
+            es = xgb.callback.EarlyStopping(rounds=200, save_best=True, maximize=False)
+            model.fit(Xtr, ytr, eval_set=[(Xva, yva)], verbose=False, callbacks=[es])
+        except TypeError:
+            try:
+                model.fit(Xtr, ytr, eval_set=[(Xva, yva)], verbose=False, early_stopping_rounds=200)
+            except TypeError:
+                model.fit(Xtr, ytr, eval_set=[(Xva, yva)], verbose=False)
         pred = model.predict(Xva)
         scores.append(rmse(yva, pred))
     return float(np.mean(scores))
@@ -390,8 +403,14 @@ def oof_predictions_xgb(X, y, test, params):
         model = xgb.XGBRegressor(**params, tree_method=tree_method, n_jobs=1, random_state=42)
         if use_gpu:
             model.set_params(predictor="gpu_predictor")
-        es = xgb.callback.EarlyStopping(rounds=200, save_best=True, maximize=False)
-        model.fit(Xtr, ytr, eval_set=[(Xva, yva)], verbose=False, callbacks=[es])
+        try:
+            es = xgb.callback.EarlyStopping(rounds=200, save_best=True, maximize=False)
+            model.fit(Xtr, ytr, eval_set=[(Xva, yva)], verbose=False, callbacks=[es])
+        except TypeError:
+            try:
+                model.fit(Xtr, ytr, eval_set=[(Xva, yva)], verbose=False, early_stopping_rounds=200)
+            except TypeError:
+                model.fit(Xtr, ytr, eval_set=[(Xva, yva)], verbose=False)
         oof[va] = model.predict(Xva)
         test_preds.append(model.predict(test))
 
@@ -407,7 +426,10 @@ def oof_predictions_lgb(X, y, test, params):
     for tr, va in cv.split(X):
         Xtr, Xva = X[tr], X[va]
         ytr, yva = y[tr], y[va]
-        model = lgb.LGBMRegressor(**params, random_state=42, n_jobs=1)
+        rs = params.get("random_state", 42)
+        params = dict(params)
+        params.pop("random_state", None)
+        model = lgb.LGBMRegressor(**params, random_state=rs, n_jobs=1)
         if use_gpu:
             model.set_params(device="gpu")
         model.fit(
@@ -419,6 +441,36 @@ def oof_predictions_lgb(X, y, test, params):
         )
         oof[va] = model.predict(Xva)
         test_preds.append(model.predict(test))
+
+    return oof, np.mean(test_preds, axis=0)
+
+
+def oof_predictions_tabnet(X, y, test):
+    cv = KFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
+    oof = np.zeros(len(X), dtype=np.float32)
+    test_preds = []
+
+    device = "cuda" if gpu_available() else "cpu"
+    for tr, va in cv.split(X):
+        Xtr, Xva = X[tr], X[va]
+        ytr, yva = y[tr], y[va]
+
+        model = TabNetRegressor(device_name=device)
+        model.fit(
+            Xtr,
+            ytr.reshape(-1, 1),
+            eval_set=[(Xva, yva.reshape(-1, 1))],
+            eval_metric=["rmse"],
+            max_epochs=200,
+            patience=20,
+            batch_size=1024,
+            virtual_batch_size=128,
+            num_workers=0,
+            drop_last=False,
+        )
+
+        oof[va] = model.predict(Xva).ravel()
+        test_preds.append(model.predict(test).ravel())
 
     return oof, np.mean(test_preds, axis=0)
 
@@ -499,6 +551,20 @@ def main():
     base_models.append(("ridge", "sk_scaled", RidgeCV(alphas=[0.1, 0.3, 1.0, 3.0, 10.0])))
     base_models.append(("bayes", "sk_scaled", BayesianRidge()))
     base_models.append(("enet", "sk_scaled", ElasticNet(alpha=0.001, l1_ratio=0.2, max_iter=5000, random_state=42)))
+    base_models.append((
+        "mlp",
+        "sk_scaled",
+        MLPRegressor(
+            hidden_layer_sizes=(256, 128),
+            activation="relu",
+            alpha=1e-4,
+            learning_rate="adaptive",
+            max_iter=300,
+            random_state=42,
+        ),
+    ))
+    if USE_TABNET:
+        base_models.append(("tabnet", "tabnet", None))
 
     logger.info("Generating OOF predictions for %d models...", len(base_models))
     oof_list = []
@@ -517,6 +583,8 @@ def main():
             oof, test_pred = oof_sklearn(model, X_tree.values, y, test_tree.values)
         elif kind == "sk_scaled":
             oof, test_pred = oof_sklearn(model, X_scaled, y, test_scaled)
+        elif kind == "tabnet":
+            oof, test_pred = oof_predictions_tabnet(X_tree.values, y, test_tree.values)
         else:
             raise ValueError(f"Unknown model kind: {kind}")
 

@@ -11,4 +11,5 @@ torch
 transformers
 catboost
 ray[tune]
+pytorch-tabnet
 pydantic
