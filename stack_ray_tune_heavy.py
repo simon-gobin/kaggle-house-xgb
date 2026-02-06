@@ -29,6 +29,7 @@ import lightgbm as lgb
 
 import ray
 from ray import tune
+from ray.tune.search.optuna import OptunaSearch
 
 
 logging.basicConfig(
@@ -234,10 +235,16 @@ def tune_catboost(X, y, cat_cols):
     if not use_gpu:
         param_space["rsm"] = tune.uniform(0.6, 1.0)
 
+    algo = OptunaSearch(metric="rmse", mode="min")
     tuner = tune.Tuner(
         tune.with_resources(trainable, resources=RESOURCES),
         param_space=param_space,
-        tune_config=tune.TuneConfig(num_samples=N_SAMPLES, metric="rmse", mode="min"),
+        tune_config=tune.TuneConfig(
+            search_alg=algo,
+            num_samples=N_SAMPLES,
+            metric="rmse",
+            mode="min",
+        ),
     )
     results = tuner.fit()
     return results.get_best_result(metric="rmse", mode="min").config
@@ -271,10 +278,16 @@ def tune_xgb(X, y):
         "reg_lambda": tune.uniform(0.5, 2.0),
     }
 
+    algo = OptunaSearch(metric="rmse", mode="min")
     tuner = tune.Tuner(
         tune.with_resources(trainable, resources=RESOURCES),
         param_space=param_space,
-        tune_config=tune.TuneConfig(num_samples=N_SAMPLES, metric="rmse", mode="min"),
+        tune_config=tune.TuneConfig(
+            search_alg=algo,
+            num_samples=N_SAMPLES,
+            metric="rmse",
+            mode="min",
+        ),
     )
     results = tuner.fit()
     return results.get_best_result(metric="rmse", mode="min").config
@@ -308,10 +321,16 @@ def tune_lgb(X, y):
         "reg_lambda": tune.uniform(0.5, 2.0),
     }
 
+    algo = OptunaSearch(metric="rmse", mode="min")
     tuner = tune.Tuner(
         tune.with_resources(trainable, resources=RESOURCES),
         param_space=param_space,
-        tune_config=tune.TuneConfig(num_samples=N_SAMPLES, metric="rmse", mode="min"),
+        tune_config=tune.TuneConfig(
+            search_alg=algo,
+            num_samples=N_SAMPLES,
+            metric="rmse",
+            mode="min",
+        ),
     )
     results = tuner.fit()
     return results.get_best_result(metric="rmse", mode="min").config
