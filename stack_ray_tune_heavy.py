@@ -200,6 +200,7 @@ def cv_lgb(params, X, y):
 def tune_catboost(X, y, cat_cols):
     use_gpu = CATBOOST_USE_GPU and gpu_available()
 
+
     def trainable(config):
         params = dict(config)
         params.update(
