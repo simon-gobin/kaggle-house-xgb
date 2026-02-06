@@ -40,7 +40,7 @@ logger = logging.getLogger("STACK_RAY")
 N_FOLDS = 3
 N_SAMPLES = 15
 RESOURCES = {"cpu": 10, "gpu": 0}
-CATBOOST_USE_GPU = False   # force CPU
+CATBOOST_USE_GPU = False   # force CatBoost to CPU to avoid GPU VRAM pressure
 
 
 
@@ -408,6 +408,7 @@ def main():
 
     use_gpu = gpu_available()
     logger.info("Compute mode: %s", "GPU" if use_gpu else "CPU")
+    logger.info("CatBoost mode: %s", "GPU" if (CATBOOST_USE_GPU and use_gpu) else "CPU")
 
     X, y, test = load_data()
     X = feature_engineer(X)
@@ -437,7 +438,6 @@ def main():
     base_models = []
 
     # CatBoost variants (4)
-    #use_gpu = gpu_available()
     cb_base = {
         **best_cb,
         "loss_function": "RMSE",
@@ -445,11 +445,12 @@ def main():
         "od_type": "Iter",
         "od_wait": 200,
     }
-    if use_gpu:
+    if CATBOOST_USE_GPU and use_gpu:
         cb_base["task_type"] = "GPU"
         cb_base["devices"] = "0"
     else:
-        cb_base.pop("rsm", None)
+        # Keep rsm on CPU; remove only if GPU is enabled
+        pass
 
     base_models.append(("catboost_1", "cat", cb_base))
     base_models.append(("catboost_2", "cat", {**cb_base, "depth": max(4, cb_base["depth"] - 1)}))
