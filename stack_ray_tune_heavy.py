@@ -218,7 +218,7 @@ def tune_catboost(X, y, cat_cols):
         else:
             params["rsm"] = config.get("rsm", 0.8)
         score = cv_catboost(params, X, y, cat_cols)
-        tune.report(rmse=score)
+        tune.report({"rmse": score})
 
     param_space = {
         "iterations": tune.randint(1500, 6000),
@@ -258,7 +258,7 @@ def tune_xgb(X, y):
         if use_gpu:
             params["predictor"] = "gpu_predictor"
         score = cv_xgb(params, X, y)
-        tune.report(rmse=score)
+        tune.report({"rmse": score})
 
     param_space = {
         "n_estimators": tune.randint(1500, 6000),
@@ -294,7 +294,7 @@ def tune_lgb(X, y):
         if use_gpu:
             params["device"] = "gpu"
         score = cv_lgb(params, X, y)
-        tune.report(rmse=score)
+        tune.report({"rmse": score})
 
     param_space = {
         "n_estimators": tune.randint(1500, 6000),
