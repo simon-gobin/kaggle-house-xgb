@@ -173,7 +173,8 @@ def cv_xgb(params, X, y):
         Xtr, Xva = X[tr], X[va]
         ytr, yva = y[tr], y[va]
         model = xgb.XGBRegressor(**params)
-        model.fit(Xtr, ytr, eval_set=[(Xva, yva)], verbose=False, early_stopping_rounds=200)
+        es = xgb.callback.EarlyStopping(rounds=200, save_best=True, maximize=False)
+        model.fit(Xtr, ytr, eval_set=[(Xva, yva)], verbose=False, callbacks=[es])
         pred = model.predict(Xva)
         scores.append(rmse(yva, pred))
     return float(np.mean(scores))
@@ -389,7 +390,8 @@ def oof_predictions_xgb(X, y, test, params):
         model = xgb.XGBRegressor(**params, tree_method=tree_method, n_jobs=1, random_state=42)
         if use_gpu:
             model.set_params(predictor="gpu_predictor")
-        model.fit(Xtr, ytr, eval_set=[(Xva, yva)], verbose=False, early_stopping_rounds=200)
+        es = xgb.callback.EarlyStopping(rounds=200, save_best=True, maximize=False)
+        model.fit(Xtr, ytr, eval_set=[(Xva, yva)], verbose=False, callbacks=[es])
         oof[va] = model.predict(Xva)
         test_preds.append(model.predict(test))
 
