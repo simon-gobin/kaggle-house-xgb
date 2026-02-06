@@ -36,13 +36,37 @@ N_FOLDS = 5
 N_TRIALS = 5
 
 
+import subprocess
+
 def gpu_available():
-    if os.environ.get("USE_GPU") == "1":
-        return True
+    if os.environ.get("USE_GPU") == "0":
+        logger.info("GPU disabled by USE_GPU=0")
+        return False
+
+    # Respect CUDA_VISIBLE_DEVICES if set
     cuda_env = os.environ.get("CUDA_VISIBLE_DEVICES")
-    if cuda_env and cuda_env not in ("", "-1", "none", "None"):
+    if cuda_env in ("", "-1", "none", "None"):
+        logger.info(f"GPU disabled by CUDA_VISIBLE_DEVICES={cuda_env}")
+        return False
+
+    # Try torch (best)
+    try:
+        import torch
+        ok = torch.cuda.is_available()
+        logger.info(f"torch.cuda.is_available() = {ok}")
+        return ok
+    except Exception:
+        pass
+
+    # Fallback: nvidia-smi
+    try:
+        subprocess.check_output(["nvidia-smi"], stderr=subprocess.STDOUT)
+        logger.info("nvidia-smi found -> GPU available")
         return True
-    return False
+    except Exception:
+        logger.info("No torch CUDA and no nvidia-smi -> CPU")
+        return False
+
 
 
 def load_data():
@@ -141,7 +165,6 @@ def optuna_catboost(X, y, cat_cols):
             "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1.0, 10.0, log=True),
             "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 1.0),
             "random_strength": trial.suggest_float("random_strength", 0.0, 2.0),
-            "rsm": trial.suggest_float("rsm", 0.6, 1.0),
             "border_count": trial.suggest_int("border_count", 32, 255),
             "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 1, 20),
             "leaf_estimation_iterations": trial.suggest_int("leaf_estimation_iterations", 1, 10),
@@ -150,6 +173,10 @@ def optuna_catboost(X, y, cat_cols):
         if use_gpu:
             params["task_type"] = "GPU"
             params["devices"] = "0"
+            logger.info("Using GPU")
+
+        if not use_gpu:
+            params["rsm"] = trial.suggest_float("rsm", 0.6, 1.0)
 
         scores = []
         for tr, va in cv.split(X):
@@ -164,7 +191,7 @@ def optuna_catboost(X, y, cat_cols):
         return float(np.mean(scores))
 
     study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=N_TRIALS, n_jobs=-1)
+    study.optimize(objective, n_trials=N_TRIALS, n_jobs=1)
     return study.best_params
 
 
@@ -188,6 +215,7 @@ def optuna_xgboost(X, y):
         }
         if use_gpu:
             params["predictor"] = "gpu_predictor"
+            logger.info("Using GPU")
 
         scores = []
         for tr, va in cv.split(X):
@@ -198,15 +226,14 @@ def optuna_xgboost(X, y):
                 Xtr,
                 ytr,
                 eval_set=[(Xva, yva)],
-                verbose=False,
-                early_stopping_rounds=200,
+                verbose=False
             )
             pred = model.predict(Xva)
             scores.append(rmse(yva, pred))
         return float(np.mean(scores))
 
     study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=N_TRIALS, n_jobs=-1)
+    study.optimize(objective, n_trials=N_TRIALS, n_jobs=1)
     return study.best_params
 
 
@@ -230,6 +257,7 @@ def optuna_lightgbm(X, y):
         }
         if use_gpu:
             params["device"] = "gpu"
+            logger.info("Using GPU")
 
         scores = []
         for tr, va in cv.split(X):
@@ -248,7 +276,7 @@ def optuna_lightgbm(X, y):
         return float(np.mean(scores))
 
     study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=N_TRIALS, n_jobs=-1)
+    study.optimize(objective, n_trials=N_TRIALS, n_jobs=1)
     return study.best_params
 
 
@@ -366,7 +394,20 @@ def main():
     base_models = []
 
     # CatBoost variants (4)
-    cb_base = {**best_cb, "loss_function": "RMSE", "eval_metric": "RMSE", "od_type": "Iter", "od_wait": 200}
+    use_gpu = gpu_available()
+    if use_gpu and "rsm" in best_cb:
+        logger.info("Dropping rsm for GPU CatBoost (not supported for RMSE).")
+        best_cb = dict(best_cb)  # avoid mutating original reference
+        best_cb.pop("rsm", None)
+
+    cb_base = {
+        **best_cb,
+        "loss_function": "RMSE",
+        "eval_metric": "RMSE",
+        "od_type": "Iter",
+        "od_wait": 200,
+    }
+
     base_models.append(("catboost_1", "cat", cb_base))
     base_models.append(("catboost_2", "cat", {**cb_base, "depth": max(4, cb_base["depth"] - 1)}))
     base_models.append(("catboost_3", "cat", {**cb_base, "depth": min(10, cb_base["depth"] + 1)}))

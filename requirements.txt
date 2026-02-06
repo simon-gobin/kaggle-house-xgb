@@ -10,3 +10,4 @@ optuna
 torch
 transformers
 catboost
+ray[tune]

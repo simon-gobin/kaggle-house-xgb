@@ -226,24 +226,27 @@ def tune_lgb(X, y):
         params = dict(config)
         params.update(
             {
-                "device": "gpu",
                 "random_state": 42,
                 "n_jobs": 1,
+                "task_type": "GPU",
+                "devices": "0",
+                "rsm": 1.0,  # safe on GPU
             }
         )
         score = cv_lgb(params, X, y)
         tune.report(rmse=score)
 
     param_space = {
-        "n_estimators": tune.randint(1500, 6000),
+        "iterations": tune.randint(1500, 6000),
         "learning_rate": tune.loguniform(0.01, 0.1),
-        "num_leaves": tune.randint(16, 128),
-        "max_depth": tune.randint(3, 10),
-        "min_child_samples": tune.randint(5, 30),
-        "subsample": tune.uniform(0.6, 1.0),
-        "colsample_bytree": tune.uniform(0.6, 1.0),
-        "reg_alpha": tune.uniform(0.0, 1.0),
-        "reg_lambda": tune.uniform(0.5, 2.0),
+        "depth": tune.randint(4, 10),
+        "l2_leaf_reg": tune.loguniform(1.0, 10.0),
+        "bagging_temperature": tune.uniform(0.0, 1.0),
+        "random_strength": tune.uniform(0.0, 2.0),
+        # "rsm": tune.uniform(0.6, 1.0),  # <-- REMOVE on GPU regression
+        "border_count": tune.randint(32, 255),
+        "min_data_in_leaf": tune.randint(1, 20),
+        "leaf_estimation_iterations": tune.randint(1, 10),
     }
 
     tuner = tune.Tuner(
