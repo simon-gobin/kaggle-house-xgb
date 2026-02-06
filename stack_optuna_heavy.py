@@ -33,7 +33,7 @@ logging.basicConfig(
 logger = logging.getLogger("STACK_HEAVY")
 
 N_FOLDS = 5
-N_TRIALS = 15
+N_TRIALS = 5
 
 
 def gpu_available():
@@ -164,7 +164,7 @@ def optuna_catboost(X, y, cat_cols):
         return float(np.mean(scores))
 
     study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=N_TRIALS)
+    study.optimize(objective, n_trials=N_TRIALS, n_jobs=-1)
     return study.best_params
 
 
@@ -206,7 +206,7 @@ def optuna_xgboost(X, y):
         return float(np.mean(scores))
 
     study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=N_TRIALS)
+    study.optimize(objective, n_trials=N_TRIALS, n_jobs=-1)
     return study.best_params
 
 
@@ -248,7 +248,7 @@ def optuna_lightgbm(X, y):
         return float(np.mean(scores))
 
     study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=N_TRIALS)
+    study.optimize(objective, n_trials=N_TRIALS, n_jobs=-1)
     return study.best_params
 
 
