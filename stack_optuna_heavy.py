@@ -34,11 +34,15 @@ logger = logging.getLogger("STACK_HEAVY")
 
 N_FOLDS = 5
 N_TRIALS = 5
+USE_GPU = True  # set False to force CPU even if GPU is available
 
 
 import subprocess
 
 def gpu_available():
+    if not USE_GPU:
+        logger.info("GPU disabled by USE_GPU=False")
+        return False
     if os.environ.get("USE_GPU") == "0":
         logger.info("GPU disabled by USE_GPU=0")
         return False
@@ -366,6 +370,9 @@ def oof_predictions_lgb(X, y, test, params):
 
 
 def main():
+    use_gpu = gpu_available()
+    logger.info("Compute mode: %s", "GPU" if use_gpu else "CPU")
+
     X, y, test = load_data()
     X = feature_engineer(X)
     test = feature_engineer(test)

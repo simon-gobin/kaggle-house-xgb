@@ -11,3 +11,4 @@ torch
 transformers
 catboost
 ray[tune]
+ray[tune]
