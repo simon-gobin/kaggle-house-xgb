@@ -142,8 +142,8 @@ def cv_catboost(params, X, y, cat_cols):
 def tune_catboost(X, y, cat_cols):
     def trainable(config):
         params = {
-            "loss_function": "MAE",
-            "eval_metric": "MAE",
+            "loss_function": "YetiRank",
+            "eval_metric": "YetiRank",
             "random_seed": 42,
             "od_type": "Iter",
             "od_wait": 200,
@@ -363,8 +363,8 @@ def main():
 
     # Train final CatBoost
     params = {
-        "loss_function": "MAE",
-        "eval_metric": "MAE",
+        "loss_function": "YetiRank",
+        "eval_metric": "YetiRank",
         "random_seed": 42,
         "od_type": "Iter",
         "od_wait": 200,
