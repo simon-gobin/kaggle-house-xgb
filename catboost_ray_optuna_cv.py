@@ -33,9 +33,9 @@ N_FOLDS = 10
 N_TRIALS = 50
 
 # GPU policy to avoid VRAM issues on 3060 Ti
-USE_GPU_XGB = False
-USE_GPU_LGB = False
-USE_GPU_CB = False
+USE_GPU_XGB = True
+USE_GPU_LGB = True
+USE_GPU_CB = True
 
 
 def load_data():
@@ -142,8 +142,8 @@ def cv_catboost(params, X, y, cat_cols):
 def tune_catboost(X, y, cat_cols):
     def trainable(config):
         params = {
-            "loss_function": "RMSE",
-            "eval_metric": "RMSE",
+            "loss_function": "MAE",
+            "eval_metric": "MAE",
             "random_seed": 42,
             "od_type": "Iter",
             "od_wait": 200,
@@ -363,8 +363,8 @@ def main():
 
     # Train final CatBoost
     params = {
-        "loss_function": "RMSE",
-        "eval_metric": "RMSE",
+        "loss_function": "MAE",
+        "eval_metric": "MAE",
         "random_seed": 42,
         "od_type": "Iter",
         "od_wait": 200,
