@@ -16,6 +16,8 @@ from sklearn.metrics import mean_squared_error
 from sklearn.preprocessing import OrdinalEncoder
 
 from catboost import CatBoostRegressor, Pool
+import xgboost as xgb
+import lightgbm as lgb
 
 import ray
 from ray import tune
@@ -31,6 +33,7 @@ logger = logging.getLogger("CB_RAY_OPTUNA")
 
 N_FOLDS = 10
 N_TRIALS = 50
+RESOURCES = {"cpu": 4, "gpu": 0}
 
 # GPU policy to avoid VRAM issues on 3060 Ti
 USE_GPU_XGB = True
@@ -180,12 +183,13 @@ def tune_catboost(X, y, cat_cols):
 
     algo = OptunaSearch(metric="rmse", mode="min")
     tuner = tune.Tuner(
-        trainable,
+        tune.with_resources(trainable, resources=RESOURCES),
         tune_config=tune.TuneConfig(
             search_alg=algo,
             num_samples=N_TRIALS,
             metric="rmse",
             mode="min",
+            max_concurrent_trials=2,
             trial_name_creator=lambda t: f"cb_{t.trial_id}",
         ),
         param_space=param_space,
@@ -242,12 +246,13 @@ def tune_xgb(X, y):
 
     algo = OptunaSearch(metric="rmse", mode="min")
     tuner = tune.Tuner(
-        trainable,
+        tune.with_resources(trainable, resources=RESOURCES),
         tune_config=tune.TuneConfig(
             search_alg=algo,
             num_samples=N_TRIALS,
             metric="rmse",
             mode="min",
+            max_concurrent_trials=2,
             trial_name_creator=lambda t: f"xgb_{t.trial_id}",
         ),
         param_space=param_space,
@@ -312,12 +317,13 @@ def tune_lgb(X, y):
 
     algo = OptunaSearch(metric="rmse", mode="min")
     tuner = tune.Tuner(
-        trainable,
+        tune.with_resources(trainable, resources=RESOURCES),
         tune_config=tune.TuneConfig(
             search_alg=algo,
             num_samples=N_TRIALS,
             metric="rmse",
             mode="min",
+            max_concurrent_trials=2,
             trial_name_creator=lambda t: f"lgb_{t.trial_id}",
         ),
         param_space=param_space,
@@ -329,7 +335,7 @@ def tune_lgb(X, y):
 
 
 def main():
-    ray.init(ignore_reinit_error=True)
+    ray.init(ignore_reinit_error=True, num_cpus=RESOURCES["cpu"])
 
     X, y, test = load_data()
 
