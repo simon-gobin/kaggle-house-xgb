@@ -366,8 +366,6 @@ def main():
 
     # Train final CatBoost
     params = {
-        "loss_function": "YetiRank",
-        "eval_metric": "YetiRank",
         "random_seed": 42,
         "od_type": "Iter",
         "od_wait": 200,
