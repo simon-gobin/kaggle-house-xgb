@@ -145,8 +145,6 @@ def cv_catboost(params, X, y, cat_cols):
 def tune_catboost(X, y, cat_cols):
     def trainable(config):
         params = {
-            "loss_function": "YetiRank",
-            "eval_metric": "YetiRank",
             "random_seed": 42,
             "od_type": "Iter",
             "od_wait": 200,
@@ -159,7 +157,6 @@ def tune_catboost(X, y, cat_cols):
             "border_count": config["border_count"],
             "min_data_in_leaf": config["min_data_in_leaf"],
             "leaf_estimation_iterations": config["leaf_estimation_iterations"],
-            "rsm": config["rsm"],  # CPU only
         }
         if USE_GPU_CB:
             params["task_type"] = "GPU"
