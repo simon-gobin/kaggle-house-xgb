@@ -148,7 +148,6 @@ def cv_catboost(params, X, y, cat_cols):
 def tune_catboost(X, y, cat_cols):
     def objective(trial):
         params = {
-            "loss_function": "RMSE",
             "random_seed": 42,
             "od_type": "Iter",
             "od_wait": 200,
@@ -161,7 +160,6 @@ def tune_catboost(X, y, cat_cols):
             "border_count": trial.suggest_int("border_count", 32, 255),
             "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 1, 20),
             "leaf_estimation_iterations": trial.suggest_int("leaf_estimation_iterations", 1, 10),
-            "rsm": trial.suggest_float("rsm", 0.6, 1.0),
         }
         if USE_GPU_CB and gpu_available():
             params["task_type"] = "GPU"
