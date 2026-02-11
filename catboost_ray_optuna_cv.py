@@ -38,7 +38,15 @@ RESOURCES = {"cpu": 4, "gpu": 0}
 # GPU policy to avoid VRAM issues on 3060 Ti
 USE_GPU_XGB = True
 USE_GPU_LGB = True
-USE_GPU_CB = True
+USE_GPU_CB = False
+
+
+def gpu_available():
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except Exception:
+        return False
 
 
 def load_data():
@@ -145,6 +153,8 @@ def cv_catboost(params, X, y, cat_cols):
 def tune_catboost(X, y, cat_cols):
     def trainable(config):
         params = {
+            "loss_function": "YetiRank",
+            "eval_metric": "YetiRank",
             "random_seed": 42,
             "od_type": "Iter",
             "od_wait": 200,
@@ -157,8 +167,9 @@ def tune_catboost(X, y, cat_cols):
             "border_count": config["border_count"],
             "min_data_in_leaf": config["min_data_in_leaf"],
             "leaf_estimation_iterations": config["leaf_estimation_iterations"],
+            "rsm": config["rsm"],  # CPU only
         }
-        if USE_GPU_CB:
+        if USE_GPU_CB and gpu_available():
             params["task_type"] = "GPU"
             params["devices"] = "0"
         score = cv_catboost(params, X, y, cat_cols)
@@ -214,7 +225,7 @@ def tune_xgb(X, y):
             "random_state": 42,
             "tree_method": "gpu_hist" if USE_GPU_XGB else "hist",
         }
-        if USE_GPU_XGB:
+        if USE_GPU_XGB and gpu_available():
             params["predictor"] = "gpu_predictor"
         cv = KFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
         scores = []
@@ -277,7 +288,7 @@ def tune_lgb(X, y):
             "random_state": 42,
             "n_jobs": 1,
         }
-        if USE_GPU_LGB:
+        if USE_GPU_LGB and gpu_available():
             params["device"] = "gpu"
         cv = KFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
         scores = []
@@ -366,12 +377,14 @@ def main():
 
     # Train final CatBoost
     params = {
+        "loss_function": "YetiRank",
+        "eval_metric": "YetiRank",
         "random_seed": 42,
         "od_type": "Iter",
         "od_wait": 200,
         **best_cb,
     }
-    if USE_GPU_CB:
+    if USE_GPU_CB and gpu_available():
         params["task_type"] = "GPU"
         params["devices"] = "0"
     cat_idx = [X_cb.columns.get_loc(c) for c in cat_cols] if cat_cols else []
@@ -389,9 +402,9 @@ def main():
         objective="reg:squarederror",
         n_jobs=1,
         random_state=42,
-        tree_method="gpu_hist" if USE_GPU_XGB else "hist",
+        tree_method="gpu_hist" if (USE_GPU_XGB and gpu_available()) else "hist",
     )
-    if USE_GPU_XGB:
+    if USE_GPU_XGB and gpu_available():
         xgb_model.set_params(predictor="gpu_predictor")
     xgb_model.fit(X_tree.values, y)
     preds_xgb = xgb_model.predict(test_tree.values)
@@ -408,7 +421,7 @@ def main():
             "verbose": -1,
         }
     )
-    if USE_GPU_LGB:
+    if USE_GPU_LGB and gpu_available():
         lgb_params["device"] = "gpu"
     train_set = lgb.Dataset(X_tree.values, label=y)
     booster = lgb.train(lgb_params, train_set, num_boost_round=lgb_params["n_estimators"])
