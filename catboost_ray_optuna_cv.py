@@ -165,10 +165,9 @@ def tune_catboost(X, y, cat_cols):
             "border_count": config["border_count"],
             "min_data_in_leaf": config["min_data_in_leaf"],
             "leaf_estimation_iterations": config["leaf_estimation_iterations"],
+            "task_type" : "GPU",
+            "devices":  "0"
         }
-        if USE_GPU_CB and gpu_available():
-            params["task_type"] = "GPU"
-            params["devices"] = "0"
         score = cv_catboost(params, X, y, cat_cols)
         logger.info("CatBoost trial RMSE: %.5f | %s", score, config)
         tune.report({"rmse": score})
