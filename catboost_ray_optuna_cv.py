@@ -18,11 +18,7 @@ from sklearn.preprocessing import OrdinalEncoder
 from catboost import CatBoostRegressor, Pool
 import xgboost as xgb
 import lightgbm as lgb
-
-import ray
-from ray import tune
-from ray.tune.search.optuna import OptunaSearch
-from ray.air import RunConfig
+import optuna
 
 
 logging.basicConfig(
@@ -33,7 +29,6 @@ logger = logging.getLogger("CB_RAY_OPTUNA")
 
 N_FOLDS = 10
 N_TRIALS = 50
-RESOURCES = {"cpu": 4, "gpu": 0}
 
 # GPU policy to avoid VRAM issues on 3060 Ti
 USE_GPU_XGB = True
@@ -151,75 +146,51 @@ def cv_catboost(params, X, y, cat_cols):
 
 
 def tune_catboost(X, y, cat_cols):
-    def trainable(config):
+    def objective(trial):
         params = {
+            "loss_function": "RMSE",
             "random_seed": 42,
             "od_type": "Iter",
             "od_wait": 200,
-            "iterations": config["iterations"],
-            "learning_rate": config["learning_rate"],
-            "depth": config["depth"],
-            "l2_leaf_reg": config["l2_leaf_reg"],
-            "bagging_temperature": config["bagging_temperature"],
-            "random_strength": config["random_strength"],
-            "border_count": config["border_count"],
-            "min_data_in_leaf": config["min_data_in_leaf"],
-            "leaf_estimation_iterations": config["leaf_estimation_iterations"],
-            "task_type" : "GPU",
-            "devices":  "0"
+            "iterations": trial.suggest_int("iterations", 1500, 7000),
+            "learning_rate": trial.suggest_float("learning_rate", 0.003, 0.08, log=True),
+            "depth": trial.suggest_int("depth", 4, 10),
+            "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1.0, 10.0, log=True),
+            "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 1.0),
+            "random_strength": trial.suggest_float("random_strength", 0.0, 2.0),
+            "border_count": trial.suggest_int("border_count", 32, 255),
+            "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 1, 20),
+            "leaf_estimation_iterations": trial.suggest_int("leaf_estimation_iterations", 1, 10),
+            "rsm": trial.suggest_float("rsm", 0.6, 1.0),
         }
+        if USE_GPU_CB and gpu_available():
+            params["task_type"] = "GPU"
+            params["devices"] = "0"
         score = cv_catboost(params, X, y, cat_cols)
-        logger.info("CatBoost trial RMSE: %.5f | %s", score, config)
-        tune.report({"rmse": score})
+        logger.info("CatBoost trial RMSE: %.5f", score)
+        return score
 
-    param_space = {
-        "iterations": tune.randint(1500, 7000),
-        "learning_rate": tune.loguniform(0.003, 0.08),
-        "depth": tune.randint(4, 10),
-        "l2_leaf_reg": tune.loguniform(1.0, 10.0),
-        "bagging_temperature": tune.uniform(0.0, 1.0),
-        "random_strength": tune.uniform(0.0, 2.0),
-        "border_count": tune.randint(32, 255),
-        "min_data_in_leaf": tune.randint(1, 20),
-        "leaf_estimation_iterations": tune.randint(1, 10),
-        "rsm": tune.uniform(0.6, 1.0),
-    }
-
-    algo = OptunaSearch(metric="rmse", mode="min")
-    tuner = tune.Tuner(
-        tune.with_resources(trainable, resources=RESOURCES),
-        tune_config=tune.TuneConfig(
-            search_alg=algo,
-            num_samples=N_TRIALS,
-            metric="rmse",
-            mode="min",
-            max_concurrent_trials=2,
-            trial_name_creator=lambda t: f"cb_{t.trial_id}",
-        ),
-        param_space=param_space,
-        run_config=RunConfig(verbose=1),
-    )
-    results = tuner.fit()
-    best = results.get_best_result(metric="rmse", mode="min")
-    return best.config
+    study = optuna.create_study(direction="minimize")
+    study.optimize(objective, n_trials=N_TRIALS)
+    return study.best_params
 
 
 def tune_xgb(X, y):
-    def trainable(config):
+    def objective(trial):
         params = {
-            "learning_rate": config["learning_rate"],
-            "n_estimators": config["n_estimators"],
-            "max_depth": config["max_depth"],
-            "min_child_weight": config["min_child_weight"],
-            "gamma": config["gamma"],
-            "subsample": config["subsample"],
-            "colsample_bytree": config["colsample_bytree"],
-            "reg_alpha": config["reg_alpha"],
-            "reg_lambda": config["reg_lambda"],
+            "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.08, log=True),
+            "n_estimators": trial.suggest_int("n_estimators", 1500, 7000),
+            "max_depth": trial.suggest_int("max_depth", 3, 10),
+            "min_child_weight": trial.suggest_float("min_child_weight", 0, 10),
+            "gamma": trial.suggest_float("gamma", 0, 1.0),
+            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-6, 1e-1, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-2, 10.0, log=True),
             "objective": "reg:squarederror",
             "n_jobs": 1,
             "random_state": 42,
-            "tree_method": "gpu_hist" if USE_GPU_XGB else "hist",
+            "tree_method": "gpu_hist" if (USE_GPU_XGB and gpu_available()) else "hist",
         }
         if USE_GPU_XGB and gpu_available():
             params["predictor"] = "gpu_predictor"
@@ -233,53 +204,27 @@ def tune_xgb(X, y):
             pred = model.predict(Xva)
             scores.append(rmse(yva, pred))
         score = float(np.mean(scores))
-        logger.info("XGB trial RMSE: %.5f | %s", score, config)
-        tune.report({"rmse": score})
+        logger.info("XGB trial RMSE: %.5f", score)
+        return score
 
-    param_space = {
-        "learning_rate": tune.loguniform(0.005, 0.08),
-        "n_estimators": tune.randint(1500, 7000),
-        "max_depth": tune.randint(3, 10),
-        "min_child_weight": tune.uniform(0, 10),
-        "gamma": tune.uniform(0, 1.0),
-        "subsample": tune.uniform(0.6, 1.0),
-        "colsample_bytree": tune.uniform(0.6, 1.0),
-        "reg_alpha": tune.loguniform(1e-6, 1e-1),
-        "reg_lambda": tune.loguniform(1e-2, 10.0),
-    }
-
-    algo = OptunaSearch(metric="rmse", mode="min")
-    tuner = tune.Tuner(
-        tune.with_resources(trainable, resources=RESOURCES),
-        tune_config=tune.TuneConfig(
-            search_alg=algo,
-            num_samples=N_TRIALS,
-            metric="rmse",
-            mode="min",
-            max_concurrent_trials=2,
-            trial_name_creator=lambda t: f"xgb_{t.trial_id}",
-        ),
-        param_space=param_space,
-        run_config=RunConfig(verbose=1),
-    )
-    results = tuner.fit()
-    best = results.get_best_result(metric="rmse", mode="min")
-    return best.config
+    study = optuna.create_study(direction="minimize")
+    study.optimize(objective, n_trials=N_TRIALS)
+    return study.best_params
 
 
 def tune_lgb(X, y):
-    def trainable(config):
+    def objective(trial):
         params = {
             "objective": "regression",
-            "num_leaves": config["num_leaves"],
-            "learning_rate": config["learning_rate"],
-            "n_estimators": config["n_estimators"],
-            "max_bin": config["max_bin"],
-            "bagging_fraction": config["bagging_fraction"],
-            "bagging_freq": config["bagging_freq"],
-            "feature_fraction": config["feature_fraction"],
-            "reg_alpha": config["reg_alpha"],
-            "reg_lambda": config["reg_lambda"],
+            "num_leaves": trial.suggest_int("num_leaves", 8, 128),
+            "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.08, log=True),
+            "n_estimators": trial.suggest_int("n_estimators", 1500, 7000),
+            "max_bin": trial.suggest_int("max_bin", 100, 255),
+            "bagging_fraction": trial.suggest_float("bagging_fraction", 0.6, 0.95),
+            "bagging_freq": trial.suggest_int("bagging_freq", 1, 7),
+            "feature_fraction": trial.suggest_float("feature_fraction", 0.1, 0.8),
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-6, 1e-1, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-2, 10.0, log=True),
             "verbose": -1,
             "random_state": 42,
             "n_jobs": 1,
@@ -291,7 +236,6 @@ def tune_lgb(X, y):
         for tr, va in cv.split(X):
             Xtr, Xva = X[tr], X[va]
             ytr, yva = y[tr], y[va]
-            # Use LightGBM Dataset (DMatrix equivalent)
             train_set = lgb.Dataset(Xtr, label=ytr)
             valid_set = lgb.Dataset(Xva, label=yva)
             booster = lgb.train(
@@ -304,43 +248,15 @@ def tune_lgb(X, y):
             pred = booster.predict(Xva)
             scores.append(rmse(yva, pred))
         score = float(np.mean(scores))
-        logger.info("LGB trial RMSE: %.5f | %s", score, config)
-        tune.report({"rmse": score})
+        logger.info("LGB trial RMSE: %.5f", score)
+        return score
 
-    param_space = {
-        "num_leaves": tune.randint(8, 128),
-        "learning_rate": tune.loguniform(0.005, 0.08),
-        "n_estimators": tune.randint(1500, 7000),
-        "max_bin": tune.randint(100, 255),
-        "bagging_fraction": tune.uniform(0.6, 0.95),
-        "bagging_freq": tune.randint(1, 7),
-        "feature_fraction": tune.uniform(0.1, 0.8),
-        "reg_alpha": tune.loguniform(1e-6, 1e-1),
-        "reg_lambda": tune.loguniform(1e-2, 10.0),
-    }
-
-    algo = OptunaSearch(metric="rmse", mode="min")
-    tuner = tune.Tuner(
-        tune.with_resources(trainable, resources=RESOURCES),
-        tune_config=tune.TuneConfig(
-            search_alg=algo,
-            num_samples=N_TRIALS,
-            metric="rmse",
-            mode="min",
-            max_concurrent_trials=2,
-            trial_name_creator=lambda t: f"lgb_{t.trial_id}",
-        ),
-        param_space=param_space,
-        run_config=RunConfig(verbose=1),
-    )
-    results = tuner.fit()
-    best = results.get_best_result(metric="rmse", mode="min")
-    return best.config
+    study = optuna.create_study(direction="minimize")
+    study.optimize(objective, n_trials=N_TRIALS)
+    return study.best_params
 
 
 def main():
-    ray.init(ignore_reinit_error=True, num_cpus=RESOURCES["cpu"])
-
     X, y, test = load_data()
 
     # Outlier filter (from top50 notebook)
@@ -424,7 +340,6 @@ def main():
     submission_lgb.to_csv("submission_lgb.csv", index=False)
     logger.info("Saved submission_lgb.csv")
 
-    ray.shutdown()
 
 
 if __name__ == "__main__":
