@@ -12,4 +12,5 @@ transformers
 catboost
 ray[tune]
 pytorch-tabnet
+scipy
 pydantic
